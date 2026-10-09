@@ -65,3 +65,13 @@ claude-dash --text
 gdbus call --session --dest org.gnome.Shell --object-path /de/lucaswerkmeister/ActivateWindowByTitle \
   --method de.lucaswerkmeister.ActivateWindowByTitle.activateBySubstring "parte do título"
 ```
+
+## Sync automático (dono do repo)
+
+`sync/claude-dash-sync.path` (systemd --user) vigia a pasta; 20 s depois de qualquer mudança,
+`sync/sync.sh` commita (`sync: <data>`) e faz push na main. Ativar:
+
+```bash
+ln -sfn ~/Scripts/claude_dash/sync/claude-dash-sync.{service,path} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now claude-dash-sync.path
+```
