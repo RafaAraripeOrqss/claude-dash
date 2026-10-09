@@ -291,7 +291,7 @@ def retire_label(s):
     if not s.get("retire_at"):
         return None
     m = int((s["retire_at"] - time.time()) // 60)
-    return "encerra sozinha em " + (f"{m} min" if m > 0 else "instantes")
+    return "encerra em " + (f"{m} min" if m > 0 else "instantes")
 
 
 def print_text():
@@ -449,7 +449,7 @@ def run_gui():
                 parts.append(s["name"])
             parts.append(os.path.basename(s["cwd"]) or s["cwd"])
             if s["kind"] != "interactive":
-                parts.append("background · " + ("terminal anexado" if s["attached"] else "sem terminal"))
+                parts.append(("sem terminal" if s["parked"] else "background · " + ("terminal anexado" if s["attached"] else "sem terminal")))
             if retire_label(s):
                 parts.append(retire_label(s))
             if s.get("detail"):
