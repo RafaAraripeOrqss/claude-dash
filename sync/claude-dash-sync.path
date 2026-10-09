@@ -1,0 +1,11 @@
+[Unit]
+Description=claude_dash: vigia a pasta e dispara o sync
+
+[Path]
+PathModified=/home/rafael-araripe/Scripts/claude_dash
+PathModified=/home/rafael-araripe/Scripts/claude_dash/data
+PathModified=/home/rafael-araripe/Scripts/claude_dash/sync
+Unit=claude-dash-sync.service
+
+[Install]
+WantedBy=default.target

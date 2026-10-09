@@ -1,0 +1,6 @@
+[Unit]
+Description=claude_dash: commit e push automáticos
+
+[Service]
+Type=oneshot
+ExecStart=/home/rafael-araripe/Scripts/claude_dash/sync/sync.sh
