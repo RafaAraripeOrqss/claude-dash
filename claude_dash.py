@@ -37,6 +37,8 @@ STATUS = {
     "shell": ("No shell", "shell"),
 }
 ORDER = {"waiting": 0, "busy": 1, "idle": 2, "shell": 3}
+BG_RETIRE_SECS = 3600     # o daemon aposenta job bg ocioso e sem terminal após 60 min (daemon.log: "retire ... idle 60m")
+PINS_FILE = os.path.join(HOME, ".claude", "jobs", "pins.json")  # jobs fixados (Ctrl+T) não são aposentados
 TAIL_BYTES = 768 * 1024   # quanto do fim do transcript é lido
 EXCERPT_CHARS = 260       # tamanho do trecho da última mensagem
 
@@ -259,7 +261,17 @@ def read_sessions():
     # host que mandou a conversa para o background (/bg ou ←): quem trabalha é a sessão bg
     live_jobs = {s["job_id"] for s in out if s["job_id"]}
     out = [s for s in out if not (s["parked_job_id"] and s["parked_job_id"] in live_jobs)]
-    out.sort(key=lambda s: (ORDER.get(s["status"], 9), s["name"]))
+    # bg ocioso e sem terminal = "fechado" na prática: o daemon só o aposenta 60 min depois
+    try:
+        with open(PINS_FILE) as f:
+            pinned = f.read()
+    except OSError:
+        pinned = ""
+    for s in out:
+        s["parked"] = s["kind"] != "interactive" and s["status"] == "idle" and not s["attached"]
+        keep = bool(s["job_id"]) and s["job_id"] in pinned
+        s["retire_at"] = s["since_ms"] / 1000 + BG_RETIRE_SECS if s["parked"] and s["since_ms"] and not keep else None
+    out.sort(key=lambda s: (s["parked"], ORDER.get(s["status"], 9), s["name"]))
     return out
 
 
@@ -274,6 +286,14 @@ def age(since_ms):
     return f"há {d / 3600:.1f} h"
 
 
+def retire_label(s):
+    """'encerra sozinha em N min' para job bg ocioso sem terminal; None nos demais casos."""
+    if not s.get("retire_at"):
+        return None
+    m = int((s["retire_at"] - time.time()) // 60)
+    return "encerra sozinha em " + (f"{m} min" if m > 0 else "instantes")
+
+
 def print_text():
     rows = read_sessions()
     if not rows:
@@ -282,7 +302,7 @@ def print_text():
     for s in rows:
         print(f"{s['status']:8} {s['pid']:>8} {s['name']:20} {age(s['since_ms']):>10}  "
               f"{s['title'] or '-'}  [{os.path.basename(s['cwd'])}]"
-              f"{('  (bg, ' + ('anexada' if s['attached'] else 'sem terminal') + ')') if s['kind'] != 'interactive' else ''}")
+              f"{('  (bg, ' + ('anexada' if s['attached'] else 'sem terminal') + (', ' + retire_label(s) if retire_label(s) else '') + ')') if s['kind'] != 'interactive' else ''}")
         if s["last"]:
             print(f"{'':40}{s['last'][:110]}")
 
@@ -327,6 +347,8 @@ flowboxchild.sess { border-radius: 12px; padding: 12px 14px; margin: 0;
                     border-left: 8px solid @borders; background: @card_bg_color;
                     color: @window_fg_color; }
 flowboxchild.sess:hover { filter: brightness(1.06); }
+flowboxchild.sess.parked { opacity: 0.55; }
+flowboxchild.sess.parked:hover { opacity: 1; }
 flowboxchild.sess:backdrop, flowboxchild.sess:backdrop label { color: @window_fg_color; opacity: 1; }
 flowboxchild.st-idle    { border-left-color: @success_color; background: alpha(@success_color, 0.22); }
 flowboxchild.st-busy    { border-left-color: @warning_color; background: alpha(@warning_color, 0.28); }
@@ -376,7 +398,7 @@ def run_gui():
     from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
     class Card(Gtk.FlowBoxChild):
-        def __init__(self, s, on_expand):
+        def __init__(self, s, on_expand, on_stop):
             super().__init__()
             self.add_css_class("sess")
             self.session = s
@@ -386,8 +408,13 @@ def run_gui():
             self.expand = Gtk.Button(icon_name="pan-down-symbolic", tooltip_text="Ler a mensagem inteira",
                                      css_classes=["flat", "circular", "expand"], valign=Gtk.Align.START)
             self.expand.connect("clicked", lambda _b: on_expand(self.session))
+            self.close = Gtk.Button(icon_name="window-close-symbolic", css_classes=["flat", "circular", "expand"],
+                                    tooltip_text="Encerrar (claude stop): sem terminal e ocioso; a conversa fica salva",
+                                    valign=Gtk.Align.START)
+            self.close.connect("clicked", lambda _b: on_stop(self.session))
             top.append(self.title)
             top.append(self.expand)
+            top.append(self.close)
             line = Gtk.Box(spacing=6)
             self.status = Gtk.Label(xalign=0)
             self.sub = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["dim"], hexpand=True)
@@ -408,6 +435,11 @@ def run_gui():
                 if c.startswith("st-"):
                     self.remove_css_class(c)
             self.add_css_class(f"st-{s['css']}")
+            if s["parked"]:
+                self.add_css_class("parked")
+            else:
+                self.remove_css_class("parked")
+            self.close.set_visible(s["parked"] and bool(s["job_id"]))
             title = s["title"] or s["name"]
             self.title.set_text(title)
             self.status.set_text(f"● {s['label']} · {age(s['since_ms'])}")
@@ -418,6 +450,8 @@ def run_gui():
             parts.append(os.path.basename(s["cwd"]) or s["cwd"])
             if s["kind"] != "interactive":
                 parts.append("background · " + ("terminal anexado" if s["attached"] else "sem terminal"))
+            if retire_label(s):
+                parts.append(retire_label(s))
             if s.get("detail"):
                 parts.append(s["detail"])
             self.sub.set_text("· " + " · ".join(parts))
@@ -443,8 +477,8 @@ def run_gui():
                                     min_children_per_line=2, max_children_per_line=2, homogeneous=True,
                                     row_spacing=10, column_spacing=10, valign=Gtk.Align.START,
                                     margin_top=10, margin_bottom=10, margin_start=12, margin_end=12)
-            self.flow.set_sort_func(lambda a, b: (ORDER.get(a.session["status"], 9), a.session["name"])
-                                    > (ORDER.get(b.session["status"], 9), b.session["name"]))
+            self.flow.set_sort_func(lambda a, b: (a.session["parked"], ORDER.get(a.session["status"], 9), a.session["name"])
+                                    > (b.session["parked"], ORDER.get(b.session["status"], 9), b.session["name"]))
             self.flow.connect("child-activated", self.on_card)
             self.empty = Adw.StatusPage(title="Nenhuma sessão viva", icon_name="utilities-terminal-symbolic",
                                         description="Abra uma com o botão + ou rode `claude` num terminal.")
@@ -537,7 +571,7 @@ def run_gui():
                 if s["pid"] in self.cards:
                     self.cards[s["pid"]].update(s)
                 else:
-                    self.cards[s["pid"]] = Card(s, self.show_message)
+                    self.cards[s["pid"]] = Card(s, self.show_message, self.stop_job)
                     self.flow.append(self.cards[s["pid"]])
             for pid in list(self.cards):
                 if pid not in seen:
@@ -547,7 +581,8 @@ def run_gui():
                 self.fill_detail(self.cards[self.detail_pid].session)
             n = {}
             for s in rows:
-                n[s["status"]] = n.get(s["status"], 0) + 1
+                key = "parked" if s["parked"] else s["status"]
+                n[key] = n.get(key, 0) + 1
             bits = []
             if n.get("waiting"):
                 bits.append(f"{n['waiting']} esperando você")
@@ -555,6 +590,8 @@ def run_gui():
                 bits.append(f"{n['busy']} trabalhando")
             if n.get("idle"):
                 bits.append(f"{n['idle']} livre{'s' if n['idle'] > 1 else ''}")
+            if n.get("parked"):
+                bits.append(f"{n['parked']} sem terminal")
             self.wtitle.set_subtitle(" · ".join(bits) if bits else "")
             self.stack.set_visible_child_name("list" if rows else "empty")
             return True
@@ -608,6 +645,7 @@ def run_gui():
                                  os.path.basename(s["cwd"]) or s["cwd"],
                                  ("background · " + ("terminal anexado" if s["attached"] else "sem terminal"))
                                  if s["kind"] != "interactive" else None,
+                                 retire_label(s),
                                  s.get("detail")) if p]
             self.d_sub.set_text("· " + " · ".join(parts))
             self.d_stop.set_visible(s["kind"] != "interactive" and bool(s["job_id"]))
@@ -631,7 +669,9 @@ def run_gui():
             self.hide_detail()
             if not card:
                 return
-            s = card.session
+            self.stop_job(card.session)
+
+        def stop_job(self, s):
             subprocess.Popen(["claude", "stop", s["job_id"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.toasts.add_toast(Adw.Toast(title=f"encerrando «{s['name']}» (claude stop)", timeout=4))
 
