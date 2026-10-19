@@ -66,6 +66,15 @@ def claude_cmd(cfg, *args):
     return pre + ["claude", *args]
 
 
+# Flags de sessão interativa por conta, iguais às do comando de terminal (o `claude-p` abre em sonnet).
+SESSION_ARGS = {os.path.join(HOME, ".claude-pessoal"): ["--model", "sonnet"]}
+
+
+def claude_session_cmd(cfg, *args):
+    """Como claude_cmd, para abrir/retomar sessão: acrescenta as flags da conta (não serve para subcomando)."""
+    return claude_cmd(cfg, *SESSION_ARGS.get(os.path.abspath(cfg), []), *args)
+
+
 # status gravado pelo Claude Code -> (rótulo, classe css)
 STATUS = {
     "idle": ("Disponível", "idle"),
@@ -704,7 +713,7 @@ def run_gui():
 
         def on_closed_row(self, _list, row):
             c = row.closed
-            subprocess.Popen(["ptyxis", "--new-window", "-d", c["cwd"], "--"] + claude_cmd(self.cfg, "--resume", c["session_id"]))
+            subprocess.Popen(["ptyxis", "--new-window", "-d", c["cwd"], "--"] + claude_session_cmd(self.cfg, "--resume", c["session_id"]))
             self.toast(f"retomando «{c['title'][:60]}» em janela nova")
             self.toggle_drawer(False)
 
@@ -871,7 +880,7 @@ def run_gui():
             return False
 
         def on_new(self, _btn):
-            subprocess.Popen(["ptyxis", "--new-window", "-d", HOME, "--"] + claude_cmd(self.page.cfg))
+            subprocess.Popen(["ptyxis", "--new-window", "-d", HOME, "--"] + claude_session_cmd(self.page.cfg))
 
         def switch_tab(self, step):
             names = [n for n, _c in ACCOUNTS]
