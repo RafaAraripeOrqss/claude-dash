@@ -1,7 +1,7 @@
 # claude_dash
 
 Painel GTK para acompanhar todas as sessões do Claude Code da máquina, abertas com `claude`
-normal. Card **verde** = disponível, **amarelo** = trabalhando, **vermelho** = esperando você
+normal, de uma ou mais **contas**. Card **verde** = disponível, **amarelo** = trabalhando, **vermelho** = esperando você
 (permissão ou pergunta), **azul** = no shell (status `shell` do próprio Claude: sessão parada num
 comando de shell; ativa, não inativa). Grade de dois cards por linha; cada card traz o
 título da sessão e o começo da última mensagem do Claude; o chevron no canto abre a tela de
@@ -12,18 +12,32 @@ O botão de histórico (ou `e`) abre o drawer de **sessões encerradas**: transc
 vivo, mais recentes primeiro (até 80), com filtro por título; clique retoma a sessão numa janela
 nova do Ptyxis (`claude --resume <id>` na pasta original). Sessões de um comando só não aparecem.
 
+**Contas.** Cada conta do Claude Code (pasta de config própria) ganha uma aba, com a contagem de
+sessões vivas no rótulo (`Trabalho (3)`). Quando a aba que você *não* está olhando tem sessão
+**esperando você**, um ponto vermelho aparece no rótulo dela. O drawer de encerradas, o botão **+**
+e o retomar valem para a conta da aba aberta (para conta diferente da padrão o comando sobe com
+`CLAUDE_CONFIG_DIR=<pasta>`); as teclas `[` e `]` trocam de aba. Pasta ausente ou sem `sessions/` =
+conta vazia, sem erro. A lista fica na constante `ACCOUNTS` no topo de `claude_dash.py`:
+
+```python
+ACCOUNTS = [
+    ("Trabalho", "~/.claude"),           # comando `claude`
+    ("Pessoal", "~/.claude-pessoal"),    # comando `claude-p` (CLAUDE_CONFIG_DIR=~/.claude-pessoal)
+]
+```
+
 ```bash
 claude-dash                 # janela GTK (também no menu do GNOME: "Claude Dash", ícone Cⁿ)
-claude-dash --text          # tabela no terminal
-claude-dash --shot x.png    # renderiza a janela e sai (conferência); --open abre o detalhe do 1º card, --drawer o drawer
+claude-dash --text          # tabela no terminal, agrupada por conta (cabeçalho "== Trabalho (2) ==")
+claude-dash --shot x.png    # renderiza a janela e sai (conferência); --account <nome> escolhe a aba, --open abre o detalhe do 1º card, --drawer o drawer
 ```
 
 ## Como funciona
 
-- **Status** vem de `~/.claude/sessions/<pid>.json`, que o próprio Claude Code (≥ 2.1.x) grava:
+- **Status** vem de `<pasta da conta>/sessions/<pid>.json` (`~/.claude/sessions/` na conta padrão), que o próprio Claude Code (≥ 2.1.x) grava:
   `status` ∈ {`idle`, `busy`, `waiting`, `shell`}, `name`, `cwd`, `sessionId`. Sem hook.
   Sessão morta é descartada pelo `/proc/<pid>/stat` (pid + starttime).
-- **Título e última mensagem** vêm do fim do transcript `~/.claude/projects/<cwd>/<sessionId>.jsonl`:
+- **Título e última mensagem** vêm do fim do transcript `<pasta da conta>/projects/<cwd>/<sessionId>.jsonl`:
   último `custom-title` (`/rename`) ou `ai-title`, e o último bloco de texto de uma linha
   `assistant` da conversa principal (subagentes, `isSidechain`, ficam de fora). Lido só quando o
   arquivo muda (cache por mtime/tamanho), sem hook.
@@ -45,7 +59,7 @@ claude-dash --shot x.png    # renderiza a janela e sai (conferência); --open ab
 
 - GNOME em Wayland (testado no GNOME 50 / Ubuntu) e o terminal **Ptyxis**, uma sessão por janela.
 - Python 3 com `python3-gi`, GTK 4 e libadwaita (`apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1`).
-- Claude Code 2.1.x ou mais novo (é ele que grava `~/.claude/sessions/`).
+- Claude Code 2.1.x ou mais novo (é ele que grava `sessions/` na pasta de config).
 - Extensão GNOME *Activate Window By Title* (o `install.sh` instala pelo próprio Shell).
 
 ## Instalação
@@ -59,6 +73,9 @@ O script cria `~/.local/bin/claude-dash`, o ícone e a entrada "Claude Dash" no 
 extensão sem precisar de logout. Rode de novo para atualizar depois de um `git pull`.
 
 ## Verificação
+
+Para ensaiar uma segunda conta sem mexer na real, aponte a lista para uma pasta de teste (só teste;
+o uso normal é editar `ACCOUNTS`): `CLAUDE_DASH_ACCOUNTS="Trabalho=$HOME/.claude;Teste=/pasta/falsa"`.
 
 ```bash
 claude-dash --text

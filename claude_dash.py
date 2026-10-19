@@ -5,9 +5,17 @@ Card verde = disponível (idle), amarelo = trabalhando (busy), vermelho = precis
 (waiting), azul = no shell (o Claude reporta `shell` quando a sessão está num comando de shell). Cada card mostra o título da sessão e o começo da última mensagem do Claude.
 Clique no card foca a janela do Ptyxis daquela sessão.
 
-Fonte de dados: ~/.claude/sessions/<pid>.json (o próprio Claude Code grava status, nome,
-cwd e sessionId). Título e última mensagem vêm do transcript
-(~/.claude/projects/<cwd>/<sessionId>.jsonl: linhas "custom-title", "ai-title" e "assistant").
+Contas: o painel junta as contas do Claude Code listadas em ACCOUNTS (nome, pasta de config).
+Hoje: Trabalho = ~/.claude (comando `claude`) e Pessoal = ~/.claude-pessoal (`claude-p`, que roda
+com CLAUDE_CONFIG_DIR=~/.claude-pessoal). Cada conta tem a sua aba; o rótulo mostra quantas
+sessões vivas ela tem e um ponto vermelho aparece quando a aba que você NÃO está olhando tem
+sessão esperando por você. O drawer de encerradas é por aba. Pasta ausente ou sem sessions/ =
+conta vazia, sem erro.
+
+Fonte de dados (por conta, dentro da pasta de config dela): <pasta>/sessions/<pid>.json (o próprio
+Claude Code grava status, nome, cwd e sessionId). Título e última mensagem vêm do transcript
+(<pasta>/projects/<cwd>/<sessionId>.jsonl: linhas "custom-title", "ai-title" e "assistant"); os jobs
+fixados vêm de <pasta>/jobs/pins.json.
 
 Foco da janela: extensão GNOME "Activate Window By Title" (D-Bus), casando o título que o
 Claude escreve na janela do Ptyxis ("✳ <título> — claude"). Sessões abertas com `claude`
@@ -15,8 +23,10 @@ normal, cada uma na sua janela do Ptyxis. Se estiverem em abas de uma mesma jane
 foca a janela (o Ptyxis não deixa escolher a aba de fora).
 
     python3 claude_dash.py              # janela GTK
-    python3 claude_dash.py --text       # imprime a tabela e sai
-    python3 claude_dash.py --shot x.png # renderiza a janela em PNG e sai
+    python3 claude_dash.py --text       # imprime a tabela (agrupada por conta) e sai
+    python3 claude_dash.py --shot x.png # renderiza a janela em PNG e sai (--account <nome> escolhe a aba)
+
+Só para teste: CLAUDE_DASH_ACCOUNTS="Nome=/pasta;Outro=/pasta" substitui a lista ACCOUNTS.
 """
 import json
 import os
@@ -26,8 +36,35 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-SESS_DIR = os.path.join(HOME, ".claude", "sessions")
-PROJ_DIR = os.path.join(HOME, ".claude", "projects")
+DEFAULT_CFG = os.path.join(HOME, ".claude")
+
+# Contas do Claude Code: (nome da aba, pasta de config). Edite aqui para somar ou tirar uma conta.
+ACCOUNTS = [
+    ("Trabalho", os.path.join(HOME, ".claude")),          # comando `claude`
+    ("Pessoal", os.path.join(HOME, ".claude-pessoal")),   # comando `claude-p` (CLAUDE_CONFIG_DIR)
+]
+if os.environ.get("CLAUDE_DASH_ACCOUNTS"):  # só para teste: "Nome=/pasta;Outro=/pasta"
+    ACCOUNTS = [(n, os.path.expanduser(d)) for n, _, d in
+                (item.partition("=") for item in os.environ["CLAUDE_DASH_ACCOUNTS"].split(";") if item)]
+
+
+def sess_dir(cfg):
+    return os.path.join(cfg, "sessions")
+
+
+def proj_dir(cfg):
+    return os.path.join(cfg, "projects")
+
+
+def pins_file(cfg):
+    return os.path.join(cfg, "jobs", "pins.json")  # jobs fixados (Ctrl+T) não são aposentados
+
+
+def claude_cmd(cfg, *args):
+    """Linha de comando do `claude` na conta da pasta cfg (a padrão dispensa a variável de ambiente)."""
+    pre = [] if os.path.abspath(cfg) == DEFAULT_CFG else ["env", f"CLAUDE_CONFIG_DIR={cfg}"]
+    return pre + ["claude", *args]
+
 
 # status gravado pelo Claude Code -> (rótulo, classe css)
 STATUS = {
@@ -38,7 +75,6 @@ STATUS = {
 }
 ORDER = {"waiting": 0, "busy": 1, "idle": 2, "shell": 3}
 BG_RETIRE_SECS = 3600     # o daemon aposenta job bg ocioso e sem terminal após 60 min (daemon.log: "retire ... idle 60m")
-PINS_FILE = os.path.join(HOME, ".claude", "jobs", "pins.json")  # jobs fixados (Ctrl+T) não são aposentados
 TAIL_BYTES = 768 * 1024   # quanto do fim do transcript é lido
 EXCERPT_CHARS = 260       # tamanho do trecho da última mensagem
 
@@ -59,8 +95,8 @@ def _proc_start(pid):
         return None
 
 
-def _project_dir(cwd):
-    return os.path.join(PROJ_DIR, re.sub(r"[^A-Za-z0-9]", "-", cwd))
+def _project_dir(cfg, cwd):
+    return os.path.join(proj_dir(cfg), re.sub(r"[^A-Za-z0-9]", "-", cwd))
 
 
 def _excerpt(text):
@@ -75,9 +111,9 @@ def _excerpt(text):
 _tx_cache = {}
 
 
-def transcript_info(cwd, session_id):
+def transcript_info(cfg, cwd, session_id):
     """(título, trecho da última mensagem do Claude, mensagem completa) a partir do fim do transcript."""
-    return transcript_info_path(os.path.join(_project_dir(cwd), f"{session_id}.jsonl"))
+    return transcript_info_path(os.path.join(_project_dir(cfg, cwd), f"{session_id}.jsonl"))
 
 
 def transcript_info_path(path):
@@ -177,12 +213,12 @@ def _transcript_head(path):
     return info
 
 
-def read_closed(live_ids, limit=CLOSED_LIMIT):
-    """Sessões encerradas (transcript sem processo vivo), mais recentes primeiro."""
+def read_closed(cfg, live_ids, limit=CLOSED_LIMIT):
+    """Sessões encerradas da conta (transcript sem processo vivo), mais recentes primeiro."""
     files = []
     try:
-        for d in os.listdir(PROJ_DIR):
-            pd = os.path.join(PROJ_DIR, d)
+        for d in os.listdir(proj_dir(cfg)):
+            pd = os.path.join(proj_dir(cfg), d)
             if not os.path.isdir(pd):
                 continue
             for name in os.listdir(pd):
@@ -212,19 +248,20 @@ def read_closed(live_ids, limit=CLOSED_LIMIT):
     return out
 
 
-def read_sessions():
-    """Sessões vivas, ordenadas: vermelho, amarelo, verde, cinza."""
+def read_sessions(cfg, attached=None):
+    """Sessões vivas da conta, ordenadas: vermelho, amarelo, verde, cinza. Pasta ausente = lista vazia."""
     out = []
-    attached = _attach_targets()
+    if attached is None:
+        attached = _attach_targets()
     try:
-        names = os.listdir(SESS_DIR)
+        names = os.listdir(sess_dir(cfg))
     except OSError:
         return out
     for name in names:
         if not name.endswith(".json"):
             continue
         try:
-            with open(os.path.join(SESS_DIR, name)) as f:
+            with open(os.path.join(sess_dir(cfg), name)) as f:
                 s = json.load(f)
         except (OSError, ValueError):
             continue
@@ -239,8 +276,9 @@ def read_sessions():
         status = s.get("status") or "unknown"
         label, css = STATUS.get(status, (status, "shell"))
         cwd = s.get("cwd") or HOME
-        title, last, full = transcript_info(cwd, s["sessionId"]) if s.get("sessionId") else (None, None, None)
+        title, last, full = transcript_info(cfg, cwd, s["sessionId"]) if s.get("sessionId") else (None, None, None)
         out.append({
+            "cfg": cfg,
             "pid": pid,
             "name": s.get("name") or str(pid),
             "status": status,
@@ -263,7 +301,7 @@ def read_sessions():
     out = [s for s in out if not (s["parked_job_id"] and s["parked_job_id"] in live_jobs)]
     # bg ocioso e sem terminal = "fechado" na prática: o daemon só o aposenta 60 min depois
     try:
-        with open(PINS_FILE) as f:
+        with open(pins_file(cfg)) as f:
             pinned = f.read()
     except OSError:
         pinned = ""
@@ -273,6 +311,12 @@ def read_sessions():
         s["retire_at"] = s["since_ms"] / 1000 + BG_RETIRE_SECS if s["parked"] and s["since_ms"] and not keep else None
     out.sort(key=lambda s: (s["parked"], ORDER.get(s["status"], 9), s["name"]))
     return out
+
+
+def read_accounts():
+    """[(nome, pasta, sessões vivas)] na ordem de ACCOUNTS."""
+    attached = _attach_targets()
+    return [(name, cfg, read_sessions(cfg, attached)) for name, cfg in ACCOUNTS]
 
 
 def age(since_ms):
@@ -295,10 +339,16 @@ def retire_label(s):
 
 
 def print_text():
-    rows = read_sessions()
-    if not rows:
-        print("nenhuma sessão viva")
-        return
+    for i, (name, _cfg, rows) in enumerate(read_accounts()):
+        if i:
+            print()
+        print(f"== {name} ({len(rows)}) ==")
+        if not rows:
+            print("nenhuma sessão viva")
+        _print_rows(rows)
+
+
+def _print_rows(rows):
     for s in rows:
         print(f"{s['status']:8} {s['pid']:>8} {s['name']:20} {age(s['since_ms']):>10}  "
               f"{s['title'] or '-'}  [{os.path.basename(s['cwd'])}]"
@@ -326,7 +376,7 @@ def focus_session(s):
                 return True, None
         except Exception:
             pass
-        subprocess.Popen(["ptyxis", "--new-window", "-d", s["cwd"], "--", "claude", "attach", s["name"]])
+        subprocess.Popen(["ptyxis", "--new-window", "-d", s["cwd"], "--"] + claude_cmd(s["cfg"], "attach", s["name"]))
         return True, f"abrindo attach de «{s['name']}» em janela nova"
     try:
         if activate("activateBySubstring", needle):
@@ -357,6 +407,7 @@ flowboxchild.st-shell   { border-left-color: @blue_2; background: alpha(@blue_2,
 flowboxchild.sess label.title { font-weight: 800; font-size: 1.08em; }
 flowboxchild.sess button.expand { min-width: 22px; min-height: 22px; padding: 2px; opacity: 0.7; margin-top: -4px; margin-right: -6px; }
 flowboxchild.sess button.expand:hover { opacity: 1; }
+.tab-dot { color: @error_color; font-size: 0.8em; }
 .scrim { background: alpha(black, 0.6); }
 .detail { border-radius: 16px; padding: 20px 24px 18px 24px; border-left: 10px solid @borders;
           background: @window_bg_color; color: @window_fg_color;
@@ -459,20 +510,15 @@ def run_gui():
             self.last.set_visible(bool(s["last"]))
             self.expand.set_visible(bool(s["last_full"]))
 
-    class Win(Adw.ApplicationWindow):
-        def __init__(self, app):
-            super().__init__(application=app, title="Claude Dash", default_width=760, default_height=520)
+    class AccountPage(Gtk.Box):
+        """Uma conta: grade de cards, detalhe, drawer de encerradas e toasts, tudo da própria pasta de config."""
+
+        def __init__(self, win, name, cfg):
+            super().__init__(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True)
+            self.win, self.account, self.cfg = win, name, cfg
             self.cards = {}
-            self.wtitle = Adw.WindowTitle(title="Claude Dash")
-            header = Adw.HeaderBar(title_widget=self.wtitle)
-            new_btn = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Nova sessão (janela do Ptyxis com claude)")
-            new_btn.connect("clicked", self.on_new)
-            header.pack_start(new_btn)
-            self.drawer_btn = Gtk.ToggleButton(icon_name="document-open-recent-symbolic",
-                                               tooltip_text="Sessões encerradas (retomar)")
-            self.drawer_btn.connect("toggled", lambda b: self.toggle_drawer(b.get_active()))
-            header.pack_end(self.drawer_btn)
-            self.set_icon_name("dev.araripe.ClaudeDash")
+            self.rows = []
+            self.detail_pid = None
             self.flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, activate_on_single_click=True,
                                     min_children_per_line=2, max_children_per_line=2, homogeneous=True,
                                     row_spacing=10, column_spacing=10, valign=Gtk.Align.START,
@@ -521,10 +567,10 @@ def run_gui():
             self.dim.add_controller(click)
             self.overlay = Gtk.Overlay(child=self.stack)
             self.overlay.add_overlay(self.dim)
-            # drawer lateral: sessões encerradas, clique retoma numa janela nova do Ptyxis
+            # drawer lateral: sessões encerradas da conta, clique retoma numa janela nova do Ptyxis
             self.drawer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, css_classes=["drawer"], width_request=520)
             d_head = Gtk.Box(spacing=6, margin_top=10, margin_bottom=6, margin_start=12, margin_end=8)
-            d_head.append(Gtk.Label(label="Encerradas", xalign=0, hexpand=True, css_classes=["title"]))
+            d_head.append(Gtk.Label(label=f"Encerradas · {name}", xalign=0, hexpand=True, css_classes=["title"]))
             d_x = Gtk.Button(icon_name="window-close-symbolic", css_classes=["flat", "circular"])
             d_x.connect("clicked", lambda _b: self.toggle_drawer(False))
             d_head.append(d_x)
@@ -542,29 +588,14 @@ def run_gui():
             self.split = Adw.OverlaySplitView(content=self.overlay, sidebar=self.drawer, collapsed=True,
                                               show_sidebar=False, sidebar_position=Gtk.PackType.END,
                                               max_sidebar_width=600, min_sidebar_width=480)
-            self.toasts = Adw.ToastOverlay(child=self.split)
-            view = Adw.ToolbarView(content=self.toasts)
-            view.add_top_bar(header)
-            self.set_content(view)
-            keys = Gtk.EventControllerKey()
-            keys.connect("key-pressed", self.on_key)
-            self.add_controller(keys)
-            self.refresh()
-            GLib.timeout_add(1500, self.refresh)
-            if SHOT:
-                if "--open" in sys.argv:
-                    GLib.timeout_add(600, lambda: (self.show_message(self.flow.get_child_at_index(0).session), False)[1])
-                if "--drawer" in sys.argv:
-                    GLib.timeout_add(600, lambda: (self.toggle_drawer(True), False)[1])
-                GLib.timeout_add(2500, self.shot)
-            try:  # status muda -> atualiza na hora
-                self.mon = Gio.File.new_for_path(SESS_DIR).monitor_directory(Gio.FileMonitorFlags.NONE, None)
-                self.mon.connect("changed", lambda *_: self.refresh())
-            except Exception:
-                pass
+            self.toasts = Adw.ToastOverlay(child=self.split, hexpand=True, vexpand=True)
+            self.append(self.toasts)
 
-        def refresh(self):
-            rows = read_sessions()
+        def toast(self, title):
+            self.toasts.add_toast(Adw.Toast(title=title, timeout=4))
+
+        def refresh(self, rows):
+            self.rows = rows
             seen = set()
             for s in rows:
                 seen.add(s["pid"])
@@ -577,55 +608,11 @@ def run_gui():
                 if pid not in seen:
                     self.flow.remove(self.cards.pop(pid))
             self.flow.invalidate_sort()
-            if getattr(self, "detail_pid", None) in self.cards:
+            if self.detail_pid in self.cards:
                 self.fill_detail(self.cards[self.detail_pid].session)
-            n = {}
-            for s in rows:
-                key = "parked" if s["parked"] else s["status"]
-                n[key] = n.get(key, 0) + 1
-            bits = []
-            if n.get("waiting"):
-                bits.append(f"{n['waiting']} esperando você")
-            if n.get("busy"):
-                bits.append(f"{n['busy']} trabalhando")
-            if n.get("idle"):
-                bits.append(f"{n['idle']} livre{'s' if n['idle'] > 1 else ''}")
-            if n.get("parked"):
-                bits.append(f"{n['parked']} sem terminal")
-            self.wtitle.set_subtitle(" · ".join(bits) if bits else "")
+            elif self.detail_pid is not None:
+                self.hide_detail()
             self.stack.set_visible_child_name("list" if rows else "empty")
-            return True
-
-        def shot(self):
-            """Renderiza o conteúdo direto do nó de cena (não depende de frame do compositor)."""
-            from gi.repository import Graphene
-            root = self.split
-            w, h = root.get_width(), root.get_height()
-            if w == 0 or h == 0:
-                return True
-            snap = Gtk.Snapshot()
-            snap.append_color(Gdk.RGBA(red=0.14, green=0.14, blue=0.14, alpha=1), Graphene.Rect().init(0, 0, w, h))
-
-            def paint(widget):
-                ok, b = widget.compute_bounds(root)
-                if not ok:
-                    return
-                snap.save()
-                snap.translate(Graphene.Point().init(b.origin.x, b.origin.y))
-                widget.get_parent().snapshot_child(widget, snap)
-                snap.restore()
-            paint(self.stack)
-            if self.dim.get_visible():
-                paint(self.dim)
-            if self.split.get_show_sidebar():
-                paint(self.drawer)
-            node = snap.to_node()
-            if node is None:
-                return True
-            tex = self.get_native().get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w, h))
-            tex.save_to_png(SHOT)
-            self.get_application().quit()
-            return False
 
         def show_message(self, s):
             self.detail_pid = s["pid"]
@@ -672,8 +659,8 @@ def run_gui():
             self.stop_job(card.session)
 
         def stop_job(self, s):
-            subprocess.Popen(["claude", "stop", s["job_id"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.toasts.add_toast(Adw.Toast(title=f"encerrando «{s['name']}» (claude stop)", timeout=4))
+            subprocess.Popen(claude_cmd(self.cfg, "stop", s["job_id"]), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.toast(f"encerrando «{s['name']}» (claude stop)")
 
         def on_detail_go(self, _b):
             card = self.cards.get(self.detail_pid)
@@ -685,16 +672,15 @@ def run_gui():
             if show:
                 self.load_closed()
             self.split.set_show_sidebar(show)
-            if self.drawer_btn.get_active() != show:
-                self.drawer_btn.set_active(show)
+            self.win.sync_drawer_btn(self)
             if show:
                 self.search.grab_focus()
 
         def load_closed(self):
-            live = {s["session_id"] for s in read_sessions() if s["session_id"]}
+            live = {s["session_id"] for s in self.rows if s["session_id"]}
             while (row := self.closed_list.get_row_at_index(0)) is not None:
                 self.closed_list.remove(row)
-            for c in read_closed(live):
+            for c in read_closed(self.cfg, live):
                 row = Gtk.ListBoxRow(activatable=True, css_classes=["closed-row"])
                 row.closed = c
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -718,40 +704,205 @@ def run_gui():
 
         def on_closed_row(self, _list, row):
             c = row.closed
-            subprocess.Popen(["ptyxis", "--new-window", "-d", c["cwd"], "--", "claude", "--resume", c["session_id"]])
-            self.toasts.add_toast(Adw.Toast(title=f"retomando «{c['title'][:60]}» em janela nova", timeout=4))
+            subprocess.Popen(["ptyxis", "--new-window", "-d", c["cwd"], "--"] + claude_cmd(self.cfg, "--resume", c["session_id"]))
+            self.toast(f"retomando «{c['title'][:60]}» em janela nova")
             self.toggle_drawer(False)
-
-        def on_new(self, _btn):
-            subprocess.Popen(["ptyxis", "--new-window", "-d", HOME, "--", "claude"])
 
         def on_card(self, _flow, child):
             ok, msg = focus_session(child.session)
             if msg:
-                self.toasts.add_toast(Adw.Toast(title=msg, timeout=4))
+                self.toast(msg)
+
+    class Win(Adw.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="Claude Dash", default_width=760, default_height=520)
+            self.wtitle = Adw.WindowTitle(title="Claude Dash")
+            header = Adw.HeaderBar(title_widget=self.wtitle)
+            new_btn = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Nova sessão na conta da aba atual (janela do Ptyxis com claude)")
+            new_btn.connect("clicked", self.on_new)
+            header.pack_start(new_btn)
+            self.drawer_btn = Gtk.ToggleButton(icon_name="document-open-recent-symbolic",
+                                               tooltip_text="Sessões encerradas da conta (retomar)")
+            self.drawer_btn.connect("toggled", self.on_drawer_btn)
+            header.pack_end(self.drawer_btn)
+            self.set_icon_name("dev.araripe.ClaudeDash")
+            # uma aba por conta: botões ligados (rótulo com contagem + ponto vermelho) sobre uma Gtk.Stack
+            self.pages, self.tabs = {}, {}
+            self.pstack = Gtk.Stack(hexpand=True, vexpand=True)
+            tabbar = Gtk.Box(css_classes=["linked"], halign=Gtk.Align.CENTER, margin_top=8, margin_bottom=2)
+            first_btn = None
+            for name, cfg in ACCOUNTS:
+                page = AccountPage(self, name, cfg)
+                self.pages[name] = page
+                self.pstack.add_named(page, name)
+                label = Gtk.Label(label=name)
+                dot = Gtk.Label(label="●", css_classes=["tab-dot"], visible=False,
+                                tooltip_text="Sessão esperando você nesta conta")
+                btn = Gtk.ToggleButton()
+                inner = Gtk.Box(spacing=6)
+                inner.append(label)
+                inner.append(dot)
+                btn.set_child(inner)
+                btn.add_css_class("account-tab")
+                if first_btn is None:
+                    first_btn = btn
+                else:
+                    btn.set_group(first_btn)
+                btn.connect("toggled", self.on_tab, name)
+                tabbar.append(btn)
+                self.tabs[name] = (btn, label, dot)
+            self.tabbar = tabbar
+            self.main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            self.main.append(tabbar)
+            self.main.append(self.pstack)
+            view = Adw.ToolbarView(content=self.main)
+            view.add_top_bar(header)
+            self.set_content(view)
+            keys = Gtk.EventControllerKey()
+            keys.connect("key-pressed", self.on_key)
+            self.add_controller(keys)
+            self.current = ACCOUNTS[0][0]
+            if SHOT and "--account" in sys.argv:
+                want = sys.argv[sys.argv.index("--account") + 1]
+                self.current = want if want in self.pages else self.current
+            self.tabs[self.current][0].set_active(True)
+            self.pstack.set_visible_child_name(self.current)
+            self.refresh()
+            GLib.timeout_add(1500, self.refresh)
+            if SHOT:
+                if "--open" in sys.argv:
+                    GLib.timeout_add(600, lambda: (self.open_first(), False)[1])
+                if "--drawer" in sys.argv:
+                    GLib.timeout_add(600, lambda: (self.page.toggle_drawer(True), False)[1])
+                GLib.timeout_add(2500, self.shot)
+            self.mons = []
+            for _name, cfg in ACCOUNTS:  # status muda -> atualiza na hora (pasta que não existe: o timer cobre)
+                try:
+                    mon = Gio.File.new_for_path(sess_dir(cfg)).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+                    mon.connect("changed", lambda *_: self.refresh())
+                    self.mons.append(mon)
+                except Exception:
+                    pass
+
+        @property
+        def page(self):
+            return self.pages[self.current]
+
+        def open_first(self):
+            child = self.page.flow.get_child_at_index(0)
+            if child:
+                self.page.show_message(child.session)
+
+        def on_tab(self, btn, name):
+            if not btn.get_active():
+                return
+            self.current = name
+            self.pstack.set_visible_child_name(name)
+            self.sync_drawer_btn(self.page)
+            self.update_tabs()
+
+        def on_drawer_btn(self, btn):
+            if btn.get_active() != self.page.split.get_show_sidebar():
+                self.page.toggle_drawer(btn.get_active())
+
+        def sync_drawer_btn(self, page):
+            if page is self.page and self.drawer_btn.get_active() != page.split.get_show_sidebar():
+                self.drawer_btn.set_active(page.split.get_show_sidebar())
+
+        def update_tabs(self):
+            """Rótulo com a contagem; ponto vermelho na aba que não está aberta e tem sessão esperando."""
+            for name, page in self.pages.items():
+                _btn, label, dot = self.tabs[name]
+                label.set_text(f"{name} ({len(page.rows)})")
+                dot.set_visible(name != self.current and any(s["status"] == "waiting" for s in page.rows))
+
+        def refresh(self):
+            n = {}
+            for name, _cfg, rows in read_accounts():
+                self.pages[name].refresh(rows)
+                for s in rows:
+                    key = "parked" if s["parked"] else s["status"]
+                    n[key] = n.get(key, 0) + 1
+            self.update_tabs()
+            bits = []
+            if n.get("waiting"):
+                bits.append(f"{n['waiting']} esperando você")
+            if n.get("busy"):
+                bits.append(f"{n['busy']} trabalhando")
+            if n.get("idle"):
+                bits.append(f"{n['idle']} livre{'s' if n['idle'] > 1 else ''}")
+            if n.get("parked"):
+                bits.append(f"{n['parked']} sem terminal")
+            self.wtitle.set_subtitle(" · ".join(bits) if bits else "")
+            return True
+
+        def shot(self):
+            """Renderiza o conteúdo direto do nó de cena (não depende de frame do compositor)."""
+            from gi.repository import Graphene
+            root = self.main
+            w, h = root.get_width(), root.get_height()
+            if w == 0 or h == 0:
+                return True
+            snap = Gtk.Snapshot()
+            snap.append_color(Gdk.RGBA(red=0.14, green=0.14, blue=0.14, alpha=1), Graphene.Rect().init(0, 0, w, h))
+
+            def paint(widget):
+                parent = widget.get_parent()
+                ok, b = parent.compute_bounds(root)  # snapshot_child já aplica a posição do filho no pai
+                if not ok:
+                    return
+                snap.save()
+                snap.translate(Graphene.Point().init(b.origin.x, b.origin.y))
+                parent.snapshot_child(widget, snap)
+                snap.restore()
+            page = self.page
+            paint(self.tabbar)
+            paint(page.stack)
+            if page.dim.get_visible():
+                paint(page.dim)
+            if page.split.get_show_sidebar():
+                paint(page.drawer)
+            node = snap.to_node()
+            if node is None:
+                return True
+            tex = self.get_native().get_renderer().render_texture(node, Graphene.Rect().init(0, 0, w, h))
+            tex.save_to_png(SHOT)
+            self.get_application().quit()
+            return False
+
+        def on_new(self, _btn):
+            subprocess.Popen(["ptyxis", "--new-window", "-d", HOME, "--"] + claude_cmd(self.page.cfg))
+
+        def switch_tab(self, step):
+            names = [n for n, _c in ACCOUNTS]
+            self.tabs[names[(names.index(self.current) + step) % len(names)]][0].set_active(True)
 
         def on_key(self, _c, keyval, _code, _state):
-            if self.search.has_focus():
+            page = self.page
+            if page.search.has_focus():
                 if keyval == Gdk.KEY_Escape:
-                    self.toggle_drawer(False)
+                    page.toggle_drawer(False)
                     return True
                 return False
             if keyval == Gdk.KEY_e:
-                self.toggle_drawer(not self.split.get_show_sidebar())
+                page.toggle_drawer(not page.split.get_show_sidebar())
                 return True
-            if keyval == Gdk.KEY_Escape and self.split.get_show_sidebar():
-                self.toggle_drawer(False)
+            if keyval == Gdk.KEY_Escape and page.split.get_show_sidebar():
+                page.toggle_drawer(False)
+                return True
+            if keyval in (Gdk.KEY_bracketleft, Gdk.KEY_bracketright):
+                self.switch_tab(-1 if keyval == Gdk.KEY_bracketleft else 1)
                 return True
             if Gdk.KEY_1 <= keyval <= Gdk.KEY_9:
-                child = self.flow.get_child_at_index(keyval - Gdk.KEY_1)
+                child = page.flow.get_child_at_index(keyval - Gdk.KEY_1)
                 if child:
-                    self.on_card(self.flow, child)
+                    page.on_card(page.flow, child)
                 return True
             if keyval == Gdk.KEY_n:
                 self.on_new(None)
                 return True
-            if keyval == Gdk.KEY_Escape and self.dim.get_visible():
-                self.hide_detail()
+            if keyval == Gdk.KEY_Escape and page.dim.get_visible():
+                page.hide_detail()
                 return True
             if keyval == Gdk.KEY_q or keyval == Gdk.KEY_Escape:
                 self.close()
