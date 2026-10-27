@@ -120,9 +120,33 @@ def _excerpt(text):
 _tx_cache = {}
 
 
+_tx_where = {}
+
+
+def _transcript_path(cfg, cwd, session_id):
+    """Transcript da sessão. A pasta é a do cwd em que a conversa começou: se ela mudou de pasta
+    ou foi retomada de outra, o cwd atual não bate e o arquivo é procurado nas demais pastas."""
+    name = f"{session_id}.jsonl"
+    path = os.path.join(_project_dir(cfg, cwd), name)
+    if os.path.exists(path):
+        return path
+    cached = _tx_where.get((cfg, session_id))
+    if cached and os.path.exists(cached):
+        return cached
+    try:
+        for d in os.listdir(proj_dir(cfg)):
+            cand = os.path.join(proj_dir(cfg), d, name)
+            if os.path.exists(cand):
+                _tx_where[(cfg, session_id)] = cand
+                return cand
+    except OSError:
+        pass
+    return path
+
+
 def transcript_info(cfg, cwd, session_id):
     """(título, trecho da última mensagem do Claude, mensagem completa) a partir do fim do transcript."""
-    return transcript_info_path(os.path.join(_project_dir(cfg, cwd), f"{session_id}.jsonl"))
+    return transcript_info_path(_transcript_path(cfg, cwd, session_id))
 
 
 def transcript_info_path(path):
