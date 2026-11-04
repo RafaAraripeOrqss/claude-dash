@@ -84,7 +84,8 @@ STATUS = {
 }
 ORDER = {"waiting": 0, "busy": 1, "idle": 2, "shell": 3}
 BG_RETIRE_SECS = 3600     # o daemon aposenta job bg ocioso e sem terminal após 60 min (daemon.log: "retire ... idle 60m")
-TAIL_BYTES = 768 * 1024   # quanto do fim do transcript é lido
+TAIL_CHUNK = 1024 * 1024  # bloco lido do fim do transcript, recuando até achar a última mensagem
+SCAN_CAP = 64 * 1024 * 1024  # teto da primeira leitura de um transcript (depois só lê o que entrou)
 EXCERPT_CHARS = 260       # tamanho do trecho da última mensagem
 
 SHOT = None  # --shot <png>: salva a janela e sai
@@ -149,21 +150,11 @@ def transcript_info(cfg, cwd, session_id):
     return transcript_info_path(_transcript_path(cfg, cwd, session_id))
 
 
-def transcript_info_path(path):
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None, None, None
-    key = (st.st_mtime_ns, st.st_size)
-    cached = _tx_cache.get(path)
-    if cached and cached[0] == key:
-        return cached[1]
-    with open(path, "rb") as f:
-        f.seek(max(0, st.st_size - TAIL_BYTES))
-        tail = f.read().decode("utf-8", "replace")
+def _scan_lines(lines):
+    """(custom-title, ai-title, texto do Claude) mais recentes num trecho de linhas jsonl (bytes)."""
     custom = ai = last = None
-    for line in tail.splitlines():
-        if '"type":"custom-title"' in line or '"type":"ai-title"' in line:
+    for line in lines:
+        if b'"type":"custom-title"' in line or b'"type":"ai-title"' in line:
             try:
                 rec = json.loads(line)
             except ValueError:
@@ -172,20 +163,72 @@ def transcript_info_path(path):
                 custom = rec["customTitle"]
             elif rec.get("type") == "ai-title" and rec.get("aiTitle"):
                 ai = rec["aiTitle"]
-        elif '"type":"assistant"' in line and '"type":"text"' in line:
+        elif b'"type":"assistant"' in line and b'"type":"text"' in line:
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("isSidechain"):
-                continue  # subagente
+            if rec.get("type") != "assistant" or rec.get("isSidechain"):
+                continue  # subagente, ou registro que só cita uma mensagem
             content = rec.get("message", {}).get("content")
             if isinstance(content, list):
                 for block in content:
-                    if block.get("type") == "text" and block.get("text", "").strip():
+                    if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
                         last = block["text"]
+    return custom, ai, last
+
+
+def _scan_back(f, size):
+    """Lê o transcript do fim para o começo, em blocos, até achar a última mensagem do Claude e um
+    título. Uma janela fixa não basta: desde o 2.1.31x o transcript grava os requests da API
+    (api-request-blob/-shape) e anexos renderizados, e uma sequência longa de ferramentas empurra
+    a última mensagem para mais de 1 MB do fim. Devolve (custom, ai, last, fim da última linha completa)."""
+    custom = ai = last = None
+    pos, carry, read, end = size, b"", 0, None
+    while pos > 0 and read < SCAN_CAP:
+        start = max(0, pos - TAIL_CHUNK)
+        f.seek(start)
+        raw = f.read(pos - start)
+        read += len(raw)
+        if end is None:
+            nl = raw.rfind(b"\n")
+            end = start + nl + 1 if nl >= 0 else start
+        block, pos = raw + carry, start
+        if start > 0:
+            cut = block.find(b"\n")
+            if cut < 0:
+                carry = block
+                continue
+            carry, block = block[:cut], block[cut + 1:]
+        c, a, l = _scan_lines(block.split(b"\n"))
+        custom, ai, last = custom or c, ai or a, last or l
+        if last and (custom or ai):
+            break
+    return custom, ai, last, end or 0
+
+
+def transcript_info_path(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None, None
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _tx_cache.get(path)
+    if cached and cached["key"] == key:
+        return cached["info"]
+    with open(path, "rb") as f:
+        if cached and st.st_size >= cached["end"]:
+            # o transcript só cresce: lê o que entrou desde a última leitura
+            f.seek(cached["end"])
+            new = f.read(st.st_size - cached["end"])
+            nl = new.rfind(b"\n")
+            c, a, l = _scan_lines(new[:nl + 1].split(b"\n")) if nl >= 0 else (None, None, None)
+            custom, ai, last = c or cached["custom"], a or cached["ai"], l or cached["last"]
+            end = cached["end"] + nl + 1
+        else:
+            custom, ai, last, end = _scan_back(f, st.st_size)
     info = (custom or ai, _excerpt(last) if last else None, last.strip() if last else None)
-    _tx_cache[path] = (key, info)
+    _tx_cache[path] = {"key": key, "end": end, "custom": custom, "ai": ai, "last": last, "info": info}
     return info
 
 
