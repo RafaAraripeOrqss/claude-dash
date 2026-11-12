@@ -349,6 +349,8 @@ def read_sessions(cfg, attached=None):
             continue  # morto ou pid reaproveitado
         if s.get("spare"):
             continue  # sessão reserva que o Agent View mantém ociosa
+        if s.get("entrypoint") == "sdk-cli" and (s.get("kind") or "interactive") == "interactive":
+            continue  # `claude -p` (auditoria, hook, script): sem terminal e sem conversa, nada para focar
         status = s.get("status") or "unknown"
         label, css = STATUS.get(status, (status, "shell"))
         cwd = s.get("cwd") or HOME

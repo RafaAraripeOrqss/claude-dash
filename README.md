@@ -53,7 +53,9 @@ claude-dash --shot x.png    # renderiza a janela e sai (conferência); --account
   quando há um `claude attach` vivo). Clique tenta a janela pelo nome e, se não houver, abre
   `claude attach <nome>` numa janela nova. A tela de detalhe tem o botão "Encerrar sessão"
   (`claude stop <id>`; a conversa fica salva). O host "estacionado" e a sessão `spare` do Agent
-  View ficam escondidos.
+  View ficam escondidos. Também fica escondida a execução headless (`claude -p …`, `entrypoint`
+  `sdk-cli`: auditoria `/doctor`, hooks, scripts): ela grava o próprio `sessions/<pid>.json` mas não
+  tem terminal nem conversa para focar, e aparecia como um card "fantasma" sem título.
 
 ## Requisitos
 
