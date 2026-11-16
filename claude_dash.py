@@ -63,6 +63,8 @@ def pins_file(cfg):
 # O ptyxis tem uma instância só: `ptyxis --new-window -- cmd` roda o cmd com o ambiente de quem abriu a
 # primeira janela, não o do painel. Se foi um lembrete do systemd disparado no login (16/11), o PATH é o
 # do systemd, sem ~/.local/bin, e o `claude` dá "comando não encontrado". Por isso o PATH vai explícito.
+# WAYLAND_DISPLAY/DISPLAY também: sem elas o Claude não acha a área de transferência (selecionar não copia).
+DISPLAY_ENV = [f"{k}={os.environ[k]}" for k in ("WAYLAND_DISPLAY", "DISPLAY") if os.environ.get(k)]
 LOCAL_BIN = os.path.join(HOME, ".local", "bin")
 _path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 CLAUDE_PATH = _path if LOCAL_BIN in _path.split(os.pathsep) else LOCAL_BIN + os.pathsep + _path
@@ -70,7 +72,7 @@ CLAUDE_PATH = _path if LOCAL_BIN in _path.split(os.pathsep) else LOCAL_BIN + os.
 
 def claude_cmd(cfg, *args):
     """Linha de comando do `claude` na conta da pasta cfg, com o PATH do painel (a conta padrão dispensa CLAUDE_CONFIG_DIR)."""
-    pre = ["env", f"PATH={CLAUDE_PATH}"]
+    pre = ["env", f"PATH={CLAUDE_PATH}", *DISPLAY_ENV]
     if os.path.abspath(cfg) != DEFAULT_CFG:
         pre.append(f"CLAUDE_CONFIG_DIR={cfg}")
     return pre + ["claude", *args]
